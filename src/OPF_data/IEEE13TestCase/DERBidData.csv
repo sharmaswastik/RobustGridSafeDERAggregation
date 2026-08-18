@@ -1,0 +1,14 @@
+DER Name,Bus Location,Phase Connection,Bid Price,Offer Price,Quantity (kW)
+DER_1,Bus9,['C'],20,,-250
+DER_2,Bus10,['A'],18,,-220
+DER_3,Bus12,['C'],16,,-300
+DER_4,Bus5,"['B', 'C']",14,,-300
+DER_5,Bus12,"['A', 'B', 'C']",12,,-450
+DER_6,Bus7,"['A', 'B', 'C']",10,,-450
+DER_7,Bus7,"['A', 'B', 'C']",,6,300
+DER_8,Bus12,['B'],,8,250
+DER_9,Bus10,['A'],,10,250
+DER_10,Bus9,['C'],,12,300
+DER_11,Bus12,"['A', 'B', 'C']",,14,600
+DER_12,Bus5,"['B', 'C']",,16,350
+DER_13,Bus7,"['A', 'B', 'C']",,18,500
