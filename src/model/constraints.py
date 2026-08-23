@@ -321,7 +321,7 @@ def der_reactive_capability_constraints(model):
     model.DERReactiveCapabilityLowerBound = Constraint(model.DER, rule=der_reactive_capability_lower_bound)
 
 def der_reactive_deviation_constraints(model):
-    pf_ratio = float(np.tan(np.arccos(0.9)))
+    pf_ratio = float(np.tan(np.arccos(value(model.PF))))
 
     def reference_rule(m,d):
         return (
