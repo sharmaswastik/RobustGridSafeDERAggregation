@@ -1,9 +1,10 @@
 from pyomo.environ import *
 import numpy as np
 
-def create_model():
+def create_model(collect_duals=True):
     model = ConcreteModel()
-    model.dual = Suffix(direction = Suffix.IMPORT)
+    if collect_duals:
+        model.dual = Suffix(direction=Suffix.IMPORT)
     return model
 
 def initialize_buses(model,

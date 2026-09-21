@@ -68,6 +68,7 @@ def build_model(case=None,
                 removed_offers=None,
                 MinimizeNetworkViolations=False,
                 InfeasibleDERs=None,
+                CollectDuals=True,
                 ):
     if InfeasibleDERs is not None:
         if alpha is None:
@@ -132,7 +133,7 @@ def build_model(case=None,
 
     c_size=int((config[1].shape[0])/3)
 
-    model = create_model()
+    model = create_model(collect_duals=CollectDuals)
 
     time_periods = list(Pload_df[Pload_df['Phase'] == 'A'].copy().index)
     initialize_buses(model, bus_names=bus_df.index)

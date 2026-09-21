@@ -37,6 +37,7 @@ def initialize_DERload(model, DER_at_bus=None, DER_names=None, DER_phases=None, 
             if d in infeasible_ders and alpha_ref > 1e-8:
                 model.DERAlpha[d].unfix()
                 model.DERAlpha[d].setlb(0.0)
+                # model.DERAlpha[d].setlb(float(alpha_ref/2.0))
                 model.DERAlpha[d].setub(alpha_ref)
             else:
                 model.DERAlpha[d].fix(alpha_ref)

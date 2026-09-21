@@ -1,4 +1,5 @@
 import ast
+import natsort
 import os
 import sys
 import click
@@ -14,11 +15,13 @@ import re
 import threading
 import pickle
 import time
+import pyomo.environ as pyo
 import seaborn as sns
+from model.constraints import model_objective_function
 from model import build_model
 from model.utils import (create_matrix_dict_pandas, correct_names, data_indexing, phases_from_config, descending_sort_dict, get_duals_in_numpy_vector, custom_sort_key)
-from IDSO import count_bids, count_offers, combined_data, bubble_sizes, MaxP, args, DER_names, DER_pi, DER_P_per_phase
-from robust import alpha_at_vertex, wpm_find_vertices, vertex_transition
+from IDSO import count_bids, count_offers, combined_data, bubble_sizes, MaxP, args, DER_names, DER_pi, DER_P_per_phase, DER_P
+from robust import alpha_at_vertex, wpm_find_vertices, build_robust_model
 from figure_style import *
 
 current_dir = Path(__file__).resolve().parent
@@ -29,13 +32,12 @@ csv_dir = output_dir /"CSVFiles"
 np.seterr(all='raise')
 
 SOLVER = os.getenv('PSST_SOLVER')
-START_TIME = time.perf_counter()
 LMP = args.LMP 
 M = args.M
 pf = args.pf
 C_IDSO = args.C0
 
-def OPF(solver, data=None, OnlyBids=False, OnlyOffers=False, BothBidsOffers=False, NaiveCase=False, FinalCase=False, alpha=None, LMP=LMP, MutualCase=False, MutDER = None, MCData=None, OnlyBids_MC=False, SourceActivePower=None, SourceReactivePower=None, InfeasibleFlag=False, AdjustableDERQ=False, MinimizeDERQDeviation=False, FixedGeneration=None, PowerFlowMode=False, removed_bids=None, removed_offers=None, MinimizeNetworkViolations=False, InfeasibleDERs=None):
+def OPF(solver, data=None, OnlyBids=False, OnlyOffers=False, BothBidsOffers=False, NaiveCase=False, FinalCase=False, alpha=None, LMP=LMP, MutualCase=False, MutDER = None, MCData=None, OnlyBids_MC=False, SourceActivePower=None, SourceReactivePower=None, InfeasibleFlag=False, AdjustableDERQ=False, MinimizeDERQDeviation=False, FixedGeneration=None, PowerFlowMode=False, removed_bids=None, removed_offers=None, MinimizeNetworkViolations=False, InfeasibleDERs=None, BuildOnly=False, CollectDuals=True):
 
 	global model, SolverOutcomes
 	result = None
@@ -183,7 +185,8 @@ def OPF(solver, data=None, OnlyBids=False, OnlyOffers=False, BothBidsOffers=Fals
 			"removed_bids": removed_bids,
 			"removed_offers": removed_offers,
 			"MinimizeNetworkViolations": MinimizeNetworkViolations,
-			"InfeasibleDERs": InfeasibleDERs
+			"InfeasibleDERs": InfeasibleDERs,
+			"CollectDuals": CollectDuals,
 		}
 
 		if alpha_values is not None:
@@ -194,7 +197,10 @@ def OPF(solver, data=None, OnlyBids=False, OnlyOffers=False, BothBidsOffers=Fals
 			model_kwargs["MCData"] = MCData
 
 		return build_model(**model_kwargs)
-		
+
+	if BuildOnly:
+		return build_case_model(alpha)
+	
 	def display_loading_bar():
 		while not done:
 			print("Working on problem...", end="\r")
@@ -441,361 +447,252 @@ def OPF(solver, data=None, OnlyBids=False, OnlyOffers=False, BothBidsOffers=Fals
 	return result, SolverOutcomes
 
 if __name__ == "__main__":
-
-	CategDuals = {}
-	Duals = {}
-	Accepted_bids = {}
-	Not_accepted_bids = {}
-	total_bids = count_bids
+	PreAlphaValues = {}
 	SourceActivePower = {}
 	SourceReactivePower = {}
-	BinIData = {}
-	BinIIData = {}
-	AlphaValues = {}
 
-	######Bin I###################
+	#####Bin I###################
 
 	results, SolverOutcome = OPF(SOLVER, OnlyBids=True)
 	instance = model._model
 
 	for d in instance.DER:
-		AlphaValues[d] = float(instance.DERAlpha[d].value)
+		PreAlphaValues[d] = float(instance.DERAlpha[d].value)
 
-	for bus in instance.Buses:
-		if bus in instance.DERAtBus:
-			for d in instance.DERAtBus[bus].data():
-				if instance.DERAlpha[d].value > 0:
-						Accepted_bids[(d, bus)] = (
-							round(instance.DERAlpha[d].value,3), 
-							instance.DERPhases[d], 
-							round(instance.DERPi[d],1), 
-							round(instance.DERP[d],0) * len(instance.DERPhases[d]))
-				else:
-						Not_accepted_bids[(d, bus)] = (
-							round(instance.DERAlpha[d].value,3), 
-							instance.DERPhases[d], 
-							round(instance.DERPi[d],1), 
-							round(instance.DERP[d],0) * len(instance.DERPhases[d]))
-
-	Accepted_bids = descending_sort_dict(Accepted_bids)
-	Not_accepted_bids = descending_sort_dict(Not_accepted_bids)
-
-	print(f"\nTotal Bid Nos:{total_bids}")
-	print(f"\nAccepted Bid Nos:{len(Accepted_bids)}")
-	print("\nACCEPTED BIDS\n", Accepted_bids)
-	print("\nNOT ACCEPTED BIDS\n", Not_accepted_bids)
 	
 # ##########Bin II ####################
 
 	results, SolverOutcome = OPF(SOLVER, OnlyOffers=True)
 	instance = model._model	
-	
-	for d in instance.DER:
-		AlphaValues[d] = float(instance.DERAlpha[d].value)
-
-	Accepted_offers = {}
-	Not_accepted_offers = {}
-	CategDuals = {}
-
-	total_offers = count_offers
-
-	for bus in instance.Buses:
-		if bus in instance.DERAtBus:
-			for d in instance.DERAtBus[bus].data():
-				if instance.DERAlpha[d].value > 0:
-						Accepted_offers[(d, bus)] = (
-							round(instance.DERAlpha[d].value,3), 
-							instance.DERPhases[d], 
-							round(instance.DERPi[d],1), 
-							round(instance.DERP[d],0) * len(instance.DERPhases[d]))
-				else:
-						Not_accepted_offers[(d, bus)] = (
-							round(instance.DERAlpha[d].value,3), 
-							instance.DERPhases[d], 
-							round(instance.DERPi[d],1), 
-							round(instance.DERP[d],0) * len(instance.DERPhases[d]))
-
-	
-	
-	print(f"\nTotal Offer Nos:{total_offers}")
-	print(f"\nAccepted Offer Nos:{len(Accepted_offers)}")
-	print("\nACCEPTED OFFERS\n", Accepted_offers)
-	print("\nNOT ACCEPTED OFFERS\n", Not_accepted_offers)
-
-	##### Saving T-DOPF Results to CSV ###########
-	alpha_values_df = pd.DataFrame.from_dict(AlphaValues, orient='index', columns=['Alpha'])
-	alpha_values_df.index.name = 'DER'
-	alpha_values_df.to_csv(output_dir/f'{args.TestCase}DERPreAlphaValues.csv')
-		
-	FinalAlphaOffers = {}
-	FinalAlphaBids = {}
-
 	FinalAlphaWPM = {
-		d: 0.0 for d in DER_names
-	}
+			d: 0.0 for d in DER_names
+		}
+	for d in instance.DER:
+		PreAlphaValues[d] = float(instance.DERAlpha[d].value)
+
 	for d in DER_names:
-		if (AlphaValues.get(d, 0.0) >1e-8 and DER_P_per_phase[d] < 0):
+		if (PreAlphaValues.get(d, 0.0) >1e-8 and DER_P_per_phase[d] < 0):
 			if DER_pi[d] >= LMP + C_IDSO:
-				FinalAlphaWPM[d] = AlphaValues[d]
-			FinalAlphaBids[d] = AlphaValues[d]
-			# FinalAlphaBids[key] = [round(AlphaValues[d],3), 
-			# 		data[1],
-			# 		data[2],
-			# 		data[3]
-			# ]
+				FinalAlphaWPM[d] = PreAlphaValues[d]
 
 	for d in DER_names:
-		if (AlphaValues.get(d, 0.0) >1e-8 and DER_P_per_phase[d] > 0):
+		if (PreAlphaValues.get(d, 0.0) >1e-8 and DER_P_per_phase[d] > 0):
 			if DER_pi[d] <= LMP - C_IDSO:
-				FinalAlphaWPM[d] = AlphaValues[d]
-			FinalAlphaOffers[d] = AlphaValues[d]
-			# FinalAlphaOffers[key] = [
-			# 		round(AlphaValues[d],3), 
-			# 		data[1],
-			# 		data[2],
-			# 		data[3]
-			# ]
+				FinalAlphaWPM[d] = PreAlphaValues[d]
 
-	print("\n\n\nFINAL ALPHA BIDS (Before Robust Optimization)")
-	print(FinalAlphaBids)
-	print("\n\n\nFINAL ALPHA OFFERS (Before Robust Optimization)")
-	print(FinalAlphaOffers)
-
-	#############Robust Implementation #########################
-
-	PreAlphaValues = AlphaValues.copy()
-
-	robust_results = []
-	alpha_changes = []
-
-	qualified_bids = sorted((d for d in DER_names if (AlphaValues.get(d, 0.0) > 1e-8 and DER_P_per_phase[d] < 0)),key = lambda d: DER_pi[d], reverse=True,)
-
-	qualified_offers = sorted((d for d in DER_names if (AlphaValues.get(d, 0.0) > 1e-8 and DER_P_per_phase[d] > 0)),key = lambda d: DER_pi[d],)
-
-	IDSO_prices = {d : DER_pi[d] - C_IDSO for d in qualified_bids}
-
-	IDSO_prices.update({d : DER_pi[d] + C_IDSO for d in qualified_offers})
-
-	vertices = wpm_find_vertices(qualified_bids, qualified_offers, IDSO_prices)
-
-	removed_bids = set()
-	removed_offers = set()
-
-	robust_iteration = 0
-	change_count = 0
-	start_vertex = 0
-
-	while True:
-		restart_vertex = False
-
-		if start_vertex > 0:
-			previous_u = dict(vertices[start_vertex - 1])
-			previous_status = "optimal"
-		else:
-			previous_u = None
-			previous_status = None
-
-		print(f"\n\n\nROBUST OPTIMIZATION ITERATION {robust_iteration + 1}")
-		print(f"Checking Vertex {start_vertex+1}/{len(vertices)} for feasibility.")
-
-		for v, u in enumerate(vertices[start_vertex:], start=start_vertex):
-			vertex_alpha = alpha_at_vertex(
-				all_ders = DER_names,
-				AlphaValues = AlphaValues,
-				u =u
-			)
-
-			_, outcome = OPF(
-				SOLVER,
-				FinalCase=True,
-				alpha=vertex_alpha,
-				AdjustableDERQ=True,
-			)
-
-			vertex_status = str(outcome[1])
-
-			robust_results.append({
-				"Iteration": robust_iteration + 1,
-				"Vertex": v,
-				"Mode": "FixedAlpha",
-				"Status": vertex_status
-			})
-
-			print(f"Vertex {v + 1}/{len(vertices)} status: {vertex_status}")
-
-			if vertex_status == "optimal":
-				previous_u = dict(u)
-				previous_status = "optimal"
-				continue
-
-			if vertex_status != "infeasible":
-				raise RuntimeError(f"Unexpected solver status: {vertex_status}")
-
-			active_ders = {d for d in DER_names if vertex_alpha.get(d, 0.0) > 1e-8}
-
-			entered_ders = set()
-			exited_ders = set()
-
-			if (previous_status == 'optimal' and previous_u is not None):
-				entered_ders, exited_ders = vertex_transition(
-					previous_u=previous_u,
-					current_u=u,
-					base_alpha=AlphaValues,
-					all_ders=DER_names,
-				)
-				
-			if entered_ders:
-				repair_ders = sorted(entered_ders)
-				repair_basis = "Entered DERs"
-
-			else:
-				repair_ders = sorted(active_ders)
-				repair_basis = "Active DERs"
-
-			if not repair_ders:
-				raise RuntimeError("Infeasible vertex has no active DER alpha that can be reduced.")
-
-			print(f"Repairing infeasible vertex  {v+1} by using ({repair_basis}: {repair_ders}).")
-
-			alpha_before = {
-				d: float(vertex_alpha[d]) for d in repair_ders
-			}
-
-			_, repair_outcome = OPF(
-				SOLVER,
-				FinalCase=True,
-				alpha=vertex_alpha,
-				AdjustableDERQ=True,
-				InfeasibleDERs=repair_ders,
-			)
-
-			status_after = str(repair_outcome[1])
-
-			if status_after != "optimal":
-				raise RuntimeError(
-					"Direct-alpha repair did not find a "
-					"feasible solution. "
-					f"Status: {status_after}; "
-					f"repair basis: {repair_basis}; "
-					f"DERs: {repair_ders}"
-				)
-
-			_instance = model._model
-			changed = False
-
-			for d in repair_ders:
-				solved_value = _instance.DERAlpha[d].value
-
-				if solved_value is None:
-					raise RuntimeError(f"Solver returned None for DER {d} alpha.")
-
-				solved_alpha = float(solved_value)
-
-				changed_alpha = min(alpha_before[d], max(0.0, solved_alpha))
-
-				alpha_reduction = (alpha_before[d] - changed_alpha)
-
-				if alpha_reduction <= 1e-7:
-					AlphaValues[d] = alpha_before[d]
-					continue
-
-				AlphaValues[d] = changed_alpha
-				changed = True
-
-				alpha_changes.append({
-					"Iteration": robust_iteration + 1,
-					"Vertex": v,
-					"DER": d,
-					"RepairBasis": repair_basis,
-					"AlphaBefore": alpha_before[d],
-					"AlphaAfter": changed_alpha,
-					"AlphaReduction": alpha_reduction,
-					"Quantity Reduction (kW)": (
-						alpha_reduction
-						* abs(DER_P_per_phase[d])
-						* len(_instance.DERPhases[d])
-					),
-				})
-
-			if not changed:
-				raise RuntimeError(
-					"Solver found a feasible alpha-repair "
-					"solution, but no alpha values changed."
-				)
-
-			change_count += 1
-
-			robust_results.append({
-				"Iteration": robust_iteration + 1,
-				"Vertex": v,
-				"Mode": "AlphaAdjusted",
-				"RepairBasis": repair_basis,
-				"Status": status_after,
-			})
-
-			prefix_is_unchanged = (
-				repair_basis == "Entered DERs" and not exited_ders and all(prior_u.get(d, 0.0) <= 1e-8 for prior_u in vertices[:v] for d in repair_ders)
-			)	
-
-			if prefix_is_unchanged:			
-				start_vertex = v
-			else:
-				start_vertex = 0
-
-			restart_vertex = True
-			robust_iteration += 1
-			break
-
-		if restart_vertex:
-			continue
-
-		print(
-			"\nAll vertices are feasible under the final "
-			"AlphaValues."
+	prealpha_values_df = pd.DataFrame.from_dict(
+			PreAlphaValues,
+			orient="index",
+			columns=["Alpha"],
 		)
-		break
-
-	pd.DataFrame(
-			robust_results
-		).to_csv(
-			output_dir / "RobustVertexResults.csv",
-			index=False,
+	prealpha_values_df.index.name = "DER"
+	prealpha_values_df = prealpha_values_df.sort_index(key=natsort.natsort_keygen())
+	prealpha_values_df.to_csv(
+			output_dir / f"{args.TestCase}DERPreAlphaValues.csv"
 		)
 
-	pd.DataFrame(
-			alpha_changes
-		).to_csv(
-			output_dir / "RobustAlphaResults.csv",
-			index=False,
+	qualified_bidvalue = sum(
+			PreAlphaValues[d] * DER_P[d]
+			for d in DER_names if PreAlphaValues.get(d, 0.0) > 1e-8 and DER_P_per_phase[d] < 0
 		)
 
-			
-	FinalAlpha = {
-		d: 0.0 for d in DER_names
+	qualified_bidcount = sum(
+			1 for d in DER_names if PreAlphaValues.get(d, 0.0) > 1e-8 and DER_P_per_phase[d] < 0
+	)
+
+	qualified_offercount = sum(
+			1 for d in DER_names if PreAlphaValues.get(d, 0.0) > 1e-8 and DER_P_per_phase[d] > 0
+	)
+	
+	qualified_offervalue = sum(
+		PreAlphaValues[d] * DER_P[d]
+		for d in DER_names if PreAlphaValues.get(d, 0.0) > 1e-8 and DER_P_per_phase[d] > 0
+	)
+
+	print(f"\nTotal qualified bid value: {qualified_bidvalue:.2f} kW")
+	print(f"\nTotal qualified bid count: {qualified_bidcount}")
+	print(f"\nTotal qualified offer value: {qualified_offervalue:.2f} kW")
+	print(f"\nTotal qualified offer count: {qualified_offercount}")
+###########Robust Optimization with all clearing scenarios enforced ####################
+	START_TIME = time.perf_counter()
+	template_wrapper = OPF(
+		SOLVER,
+		BothBidsOffers=True,
+		AdjustableDERQ=True,
+		BuildOnly=True,
+		CollectDuals=False,
+	)
+	template = template_wrapper._model
+
+	qualified_bids = sorted(
+		(
+			d for d in template.DER
+			if pyo.value(template.DERP[d]) < 0
+		),
+		key=lambda d: pyo.value(template.DERPi[d]),
+		reverse=True,
+	)
+	qualified_offers = sorted(
+		(
+			d for d in template.DER
+			if pyo.value(template.DERP[d]) > 0
+		),
+		key=lambda d: pyo.value(template.DERPi[d]),
+	)
+
+	IDSO_prices = {
+		d: pyo.value(template.DERPi[d]) - C_IDSO
+		for d in qualified_bids
+	}
+	IDSO_prices.update({
+		d: pyo.value(template.DERPi[d]) + C_IDSO
+		for d in qualified_offers
+	})
+
+	vertices = wpm_find_vertices(
+		qualified_bids,
+		qualified_offers,
+		IDSO_prices,
+	)
+
+	robust_model = build_robust_model(
+		template,
+		vertices,
+		model_objective_function,
+	)
+
+	print(
+		f"\nOptimizing {len(robust_model.DER)} DER alphas "
+		f"jointly across {len(vertices)} clearing scenarios."
+	)
+
+	robust_solver = pyo.SolverFactory(SOLVER)
+	robust_solver.available(exception_flag=True)
+
+	solve_result = robust_solver.solve(
+		robust_model,
+		tee=False,
+		load_solutions=False,
+	)
+
+	termination = solve_result.solver.termination_condition
+	if termination != pyo.TerminationCondition.optimal:
+		raise RuntimeError(
+			"Joint robust optimization did not reach optimality: "
+			f"{termination}"
+		)
+
+	robust_model.solutions.load_from(solve_result)
+
+	AlphaValues = {
+		d: float(pyo.value(robust_model.DERAlpha[d]))
+		for d in robust_model.DER
 	}
 
-	FinalAlphaOffers = {}
-	FinalAlphaBids = {}
+	robust_results = [
+		{
+			"Vertex": s,
+			"Mode": "JointRobustSolve",
+			"Status": str(termination),
+		}
+		for s in robust_model.Scenarios
+	]
 
-	for d in DER_names:
-		if (AlphaValues.get(d, 0.0) >1e-8 and DER_P_per_phase[d] < 0):
-			FinalAlpha[d] = AlphaValues[d]
-			FinalAlphaBids[d] = AlphaValues[d]
+	print("\nJoint robust optimization solved with all clearing scenarios enforced.")
+	print(
+		"Robust objective:",
+		pyo.value(robust_model.GenerationObjective),
+	)
+	END_TIME = time.perf_counter()
+	execution_time = END_TIME - START_TIME
+	print(f"Robust Optimization time: {execution_time:.2f} seconds")
 
+	FinalAlpha = AlphaValues.copy()
 
-	for d in DER_names:
-		if (AlphaValues.get(d, 0.0) >1e-8 and DER_P_per_phase[d] > 0):
-			FinalAlpha[d] = AlphaValues[d]
-			FinalAlphaOffers[d] = AlphaValues[d]
+	FinalAlphaBids = {
+		d: AlphaValues[d]
+		for d in qualified_bids
+		if AlphaValues[d] > 1e-8
+	}
+	FinalAlphaOffers = {
+		d: AlphaValues[d]
+		for d in qualified_offers
+		if AlphaValues[d] > 1e-8
+	}
 
-	print("\n\n\nFINAL ALPHA BIDS (After Robust Optimization)")
+	print("\nCERTIFIED BID ALPHAS")
 	print(FinalAlphaBids)
-	print("\n\n\nFINAL ALPHA OFFERS (After Robust Optimization)")
+	print("\nCERTIFIED OFFER ALPHAS")
 	print(FinalAlphaOffers)
 
-	alpha_values_df = pd.DataFrame.from_dict(AlphaValues, orient='index', columns=['Alpha'])
-	alpha_values_df.index.name = 'DER'
-	alpha_values_df.to_csv(output_dir/f'{args.TestCase}DERRobustAlphaValues.csv')
+	alpha_values_df = pd.DataFrame.from_dict(
+		AlphaValues,
+		orient="index",
+		columns=["Alpha"],
+	)
+	alpha_values_df.index.name = "DER"
+	alpha_values_df = alpha_values_df.sort_index(key=natsort.natsort_keygen())
+	alpha_values_df.to_csv(
+		output_dir / f"{args.TestCase}DERRobustAlphaValues.csv"
+	)
+
+	pd.DataFrame(robust_results).to_csv(
+		output_dir / "RobustVertexResults.csv",
+		index=False,
+	)
+
+	pd.DataFrame([
+		{
+			"Vertex": s,
+			"DER": d,
+			"Activation": pyo.value(
+				robust_model.Activation[s, d]
+			),
+		}
+		for s in robust_model.Scenarios
+		for d in robust_model.DER
+	]).to_csv(
+		output_dir / "RobustActivations.csv",
+		index=False,
+	)
+
+	clearing_u = {d: 0.0 for d in robust_model.DER}
+
+	for d in qualified_bids:
+		clearing_u[d] = float(IDSO_prices[d] >= LMP)
+
+	for d in qualified_offers:
+		clearing_u[d] = float(IDSO_prices[d] <= LMP)
+
+	qualified_bidvalue = sum(
+		AlphaValues[d] * DER_P[d]
+		for d in qualified_bids
+	)
+
+	qualified_offervalue = sum(
+		AlphaValues[d] * DER_P[d]
+		for d in qualified_offers
+	)
+
+	qualified_bidcount = sum(
+		1 for d in qualified_bids
+		if AlphaValues[d] > 1e-8
+	)
+	qualified_offercount = sum(
+		1 for d in qualified_offers
+		if AlphaValues[d] > 1e-8
+	)
+
+	print(f"\nTotal qualified bid value (ROBUST): {qualified_bidvalue:.2f} kW")
+	print(f"\nTotal qualified bid count (ROBUST): {qualified_bidcount}")
+	print(f"\nTotal qualified offer value (ROBUST): {qualified_offervalue:.2f} kW")
+	print(f"\nTotal qualified offer count (ROBUST): {qualified_offercount}")
+
+	# FinalAlphaWPM = alpha_at_vertex(
+	# 	all_ders=list(robust_model.DER),
+	# 	AlphaValues=AlphaValues,
+	# 	u=clearing_u,
+	# )
 
 ##################Getting WPM Results Before Moving Further ######################
 
@@ -977,7 +874,11 @@ if __name__ == "__main__":
 			)
 
 			fig.savefig(
-				figures_dir / f"VoltageWPMCheckViolations{args.TestCase}.pdf",
+				figures_dir / "PDFs" / f"VoltageWPMCheckViolations{args.TestCase}.pdf",
+				dpi=600, pad_inches=0.05, bbox_inches='tight'
+			)
+			fig.savefig(
+				figures_dir / "PNGs" / f"VoltageWPMCheckViolations{args.TestCase}.png",
 				dpi=600, pad_inches=0.05, bbox_inches='tight'
 			)
 			
@@ -1272,7 +1173,13 @@ if __name__ == "__main__":
 			)
 
 			fig.savefig(
-				figures_dir / f"VoltageWPMCheckViolations{args.TestCase}.pdf",
+				figures_dir /"PDFs" / f"VoltageWPMCheckViolations{args.TestCase}.pdf",
+				bbox_inches='tight',
+				pad_inches=0,
+				dpi=600
+			)
+			fig.savefig(
+				figures_dir /"PNGs" / f"VoltageWPMCheckViolations{args.TestCase}.png",
 				bbox_inches='tight',
 				pad_inches=0,
 				dpi=600
@@ -1301,8 +1208,8 @@ if __name__ == "__main__":
 					LMP=l,
 					alpha=FinalAlpha,
 					AdjustableDERQ=True,
-					MinimizeDERQDeviation=True,
-					removed_bids=removed_bids, removed_offers=removed_offers)
+					MinimizeDERQDeviation=True,)
+					#removed_bids=removed_bids, removed_offers=removed_offers)
 
 				instance = model._model
 				labels = list(instance.Buses)
@@ -1481,7 +1388,10 @@ if __name__ == "__main__":
 			)
 
 			fig.savefig(
-				figures_dir / f"VoltageWPMCheckViolations{args.TestCase}DERQActivated.pdf",
+				figures_dir / "PDFs" / f"VoltageWPMCheckViolations{args.TestCase}DERQActivated.pdf",
+				dpi=600, pad_inches=0.1, bbox_inches='tight')
+			fig.savefig(
+				figures_dir / "PNGs" / f"VoltageWPMCheckViolations{args.TestCase}DERQActivated.png",
 				dpi=600, pad_inches=0.1, bbox_inches='tight')
 
 		else:
@@ -1503,9 +1413,8 @@ if __name__ == "__main__":
 				LMP=LMP,
 				alpha=FinalAlpha,
 				AdjustableDERQ=True,
-				MinimizeDERQDeviation=True,
-				removed_bids=removed_bids, removed_offers=removed_offers
-			)
+				MinimizeDERQDeviation=True,)
+				#removed_bids=removed_bids, removed_offers=removed_offers)
 
 			instance = model._model
 			labels = list(instance.Buses)
@@ -1663,12 +1572,14 @@ if __name__ == "__main__":
 			)
 			
 			fig.savefig(
-				figures_dir / f"VoltageWPMCheckViolations{args.TestCase}DERQ.pdf",
+				figures_dir/"PDFs" / f"VoltageWPMCheckViolations{args.TestCase}DERQ.pdf",
 				bbox_inches='tight',
 				pad_inches=0,
 				dpi=600
 			)
-
-END_TIME = time.perf_counter()
-execution_time = END_TIME - START_TIME
-print(f"Execution time: {execution_time:.2f} seconds")
+			fig.savefig(
+				figures_dir/"PNGs" / f"VoltageWPMCheckViolations{args.TestCase}DERQ.png",
+				bbox_inches='tight',
+				pad_inches=0,
+				dpi=600
+			)

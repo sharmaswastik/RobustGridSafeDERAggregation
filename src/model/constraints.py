@@ -252,15 +252,18 @@ def constraint_reactive_scheduled_interchange(model, SourceReactivePower):
     model.ReactiveScheduledInterchangeConstraint = Constraint(model.Phases, model.TimePeriods, rule=partial_reactive_scheduled_interchange_rule)
 
 def model_objective_function(m):
-    
     objective = 0
+
     for d in m.DER:
+        quantity = len(m.DERPhases[d]) * m.DERP[d]
+
         if m.DERP[d] <= 0:
-            objective += m.DERAlpha[d] * m.DERPi[d] * (len(m.DERPhases[d]) * m.DERP[d])
+            objective += m.DERAlpha[d] * m.DERPi[d] * quantity
         else:
-            objective += m.DERAlpha[d] * (m.DERPi[d] * len(m.DERPhases[d]) * m.DERP[d] - m.M)
-    b = m.HeadBus.at(1)
-    objective += 2.5*sum(((m.ActivePowerAtSourceBus[p,b,t])* m.S_Base/3) for p in m.Phases for t in m.TimePeriods)
+            objective += m.DERAlpha[d] * (
+                m.DERPi[d] * quantity - m.M
+            )
+
     return objective
 
 def objective_function(model):
@@ -321,7 +324,7 @@ def der_reactive_capability_constraints(model):
     model.DERReactiveCapabilityLowerBound = Constraint(model.DER, rule=der_reactive_capability_lower_bound)
 
 def der_reactive_deviation_constraints(model):
-    pf_ratio = float(np.tan(np.arccos(0.9)))
+    pf_ratio = float(np.tan(np.arccos(value(model.PF))))
 
     def reference_rule(m,d):
         return (
